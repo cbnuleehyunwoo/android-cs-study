@@ -1,0 +1,767 @@
+<title>SparseArray 동작 원리</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: 개념 → 직접 조작 → 소스 → 선택 가이드로 내려가는 학습 노트. 메모리 비교 페이지와 같은 토큰을 써서 한 시리즈로 읽히게 */
+:root {
+  --bg: #f4f6f9;
+  --surface: #ffffff;
+  --fg: #141a22;
+  --muted: #586172;
+  --line: #dde2ea;
+  --soft: #ebeff5;
+  --data: #2a78d6;
+  --data-tint: #dbe8f8;
+  --link: #eb6834;
+  --link-tint: #fbe3d8;
+  --head: #a2a9b6;
+  --s-hash: #6250d6;
+  --s-sparse: #1baf7a;
+  --code-bg: #f0f3f7;
+  --font-sans: "IBM Plex Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1217; --surface: #161a21; --fg: #e7eaf0; --muted: #9ba4b3; --line: #29303a; --soft: #1e232c;
+    --data: #3987e5; --data-tint: #1b2c44; --link: #e0703f; --link-tint: #3a2419; --head: #5c6474;
+    --s-hash: #9085e9; --s-sparse: #199e70; --code-bg: #12161c;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1217; --surface: #161a21; --fg: #e7eaf0; --muted: #9ba4b3; --line: #29303a; --soft: #1e232c;
+  --data: #3987e5; --data-tint: #1b2c44; --link: #e0703f; --link-tint: #3a2419; --head: #5c6474;
+  --s-hash: #9085e9; --s-sparse: #199e70; --code-bg: #12161c;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: var(--font-sans); font-size: 15px; line-height: 1.7; padding: 40px 20px 72px; }
+.wrap { max-width: 1080px; margin: 0 auto; display: grid; gap: 64px; }
+h1, h2, h3 { text-wrap: balance; margin: 0; line-height: 1.3; }
+h1 { font-size: clamp(26px, 4.2vw, 38px); font-weight: 700; letter-spacing: -0.01em; }
+h2 { font-size: 22px; }
+h3 { font-size: 16px; }
+p { margin: 0; }
+code, .mono { font-family: var(--font-mono); font-size: 0.88em; }
+:not(pre) > code { background: var(--soft); padding: 1px 5px; border-radius: 4px; }
+a { color: var(--data); }
+.eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.lede { max-width: 66ch; color: var(--muted); font-size: 16px; }
+.lede b { color: var(--fg); font-weight: 600; }
+section { display: grid; gap: 24px; }
+.section-head { display: grid; gap: 8px; max-width: 70ch; }
+.section-head p { color: var(--muted); }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px; display: grid; gap: 14px; align-content: start; min-width: 0; }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.muted { color: var(--muted); }
+.small { font-size: 13px; }
+.scroll { overflow-x: auto; }
+
+/* 한 줄 요약 */
+.gist { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.gist .panel { gap: 10px; }
+.tag { font-family: var(--font-mono); font-weight: 600; font-size: 14px; display: inline-flex; gap: 8px; align-items: center; }
+.tag i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.flow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: 12.5px; }
+.flow span { background: var(--soft); border-radius: 6px; padding: 3px 8px; }
+.flow b { color: var(--muted); font-weight: 400; }
+
+/* 희소 배열 그림 */
+.strip { display: flex; gap: 2px; align-items: flex-end; min-width: max-content; padding-bottom: 4px; }
+.slot { width: 26px; display: grid; gap: 2px; text-align: center; }
+.slot .box { height: 26px; border-radius: 3px; box-shadow: inset 0 0 0 1px var(--line); font-family: var(--font-mono); font-size: 10px; display: grid; place-items: center; }
+.slot .ix { font-family: var(--font-mono); font-size: 9.5px; color: var(--muted); }
+.slot.on .box { background: var(--data); color: var(--surface); box-shadow: none; }
+.gap-mark { align-self: center; font-size: 12px; color: var(--muted); padding: 0 10px; white-space: nowrap; }
+.pair-table { display: grid; grid-template-columns: auto repeat(3, 64px); gap: 2px; font-family: var(--font-mono); font-size: 13px; width: max-content; }
+.pair-table div { padding: 6px 8px; text-align: center; border-radius: 3px; }
+.pair-table .h { color: var(--muted); text-align: left; font-size: 12px; font-family: var(--font-sans); padding-left: 0; }
+.pair-table .k { background: var(--data); color: var(--surface); }
+.pair-table .v { background: var(--data-tint); }
+.verdict-row { display: flex; flex-wrap: wrap; gap: 8px 24px; font-size: 14px; }
+.verdict-row b { font-family: var(--font-mono); }
+
+/* 박싱 그림 */
+.box-fig { display: grid; gap: 10px; }
+.cells { display: flex; gap: 2px; }
+.cells > div { min-width: 54px; height: 34px; border-radius: 3px; display: grid; place-items: center; font-family: var(--font-mono); font-size: 13px; }
+.c-val { background: var(--data); color: var(--surface); }
+.c-ref { background: var(--link-tint); color: var(--fg); box-shadow: inset 0 0 0 1px var(--link); }
+.c-head { background: var(--head); color: var(--surface); font-size: 11px !important; }
+.c-pad { background: repeating-linear-gradient(45deg, var(--line) 0 2px, transparent 2px 5px); }
+.arrow-down { font-family: var(--font-mono); font-size: 12px; color: var(--link); padding-left: 18px; }
+.objs { display: flex; flex-wrap: wrap; gap: 8px; }
+.obj { border: 1px dashed var(--link); border-radius: 6px; padding: 6px; display: grid; gap: 4px; }
+.obj .cells > div { min-width: 0; padding: 0 8px; height: 26px; font-size: 11px; }
+.obj small { font-size: 11px; color: var(--muted); font-family: var(--font-mono); }
+
+/* 놀이터 */
+.controls { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: end; padding: 16px 20px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
+.ctl { display: grid; gap: 6px; }
+.ctl label, .ctl > span { font-size: 12px; color: var(--muted); }
+.ctl input { font: inherit; font-family: var(--font-mono); width: 120px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); }
+.btns { display: flex; flex-wrap: wrap; gap: 8px; }
+button.op { font: inherit; font-family: var(--font-mono); font-size: 13px; padding: 7px 14px; border-radius: 8px; border: 1px solid var(--fg); background: var(--fg); color: var(--bg); cursor: pointer; }
+button.op.ghost { background: transparent; color: var(--fg); border-color: var(--line); }
+button.op:disabled { opacity: 0.4; cursor: default; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--data); outline-offset: 2px; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.chips > span { font-size: 12px; color: var(--muted); }
+.chip { font: inherit; font-size: 12.5px; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--fg); cursor: pointer; }
+.chip:hover { border-color: var(--muted); }
+.chip:disabled { opacity: 0.4; cursor: default; }
+.chip code { background: transparent; padding: 0; }
+
+.play { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.pane-top { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: baseline; }
+.stat { font-family: var(--font-mono); font-size: 12px; color: var(--muted); display: flex; gap: 12px; flex-wrap: wrap; }
+.stat b { color: var(--fg); font-weight: 600; }
+.formula { font-family: var(--font-mono); font-size: 12px; color: var(--muted); background: var(--soft); border-radius: 6px; padding: 6px 10px; }
+
+.buckets { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 6px; }
+.bucket { border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px 6px; min-height: 52px; display: grid; gap: 4px; align-content: start; transition: background 0.2s; }
+.bucket .bi { font-family: var(--font-mono); font-size: 10px; color: var(--muted); }
+.bucket.mark { background: var(--data-tint); border-color: var(--data); }
+.node { font-family: var(--font-mono); font-size: 11.5px; border-radius: 4px; background: var(--link-tint); box-shadow: inset 0 0 0 1px var(--link); padding: 2px 6px; display: flex; justify-content: space-between; gap: 4px; }
+.node small { font-size: 9.5px; color: var(--muted); }
+.node.mark { outline: 2px solid var(--fg); }
+.node.new { background: var(--link); color: var(--surface); }
+.node.new small { color: var(--surface); }
+
+.sa { display: grid; grid-template-columns: auto 1fr; gap: 4px 8px; align-items: center; min-width: max-content; }
+.sa .rl { font-family: var(--font-mono); font-size: 11px; color: var(--muted); text-align: right; }
+.sa-row { display: flex; gap: 2px; }
+.sc { width: 44px; height: 34px; border-radius: 3px; display: grid; place-items: center; font-family: var(--font-mono); font-size: 12px; box-shadow: inset 0 0 0 1px var(--line); position: relative; transition: background 0.2s; }
+.sc.ix { height: 16px; box-shadow: none; font-size: 10px; color: var(--muted); }
+.sc.used.k { background: var(--data); color: var(--surface); box-shadow: none; }
+.sc.used.v { background: var(--data-tint); box-shadow: none; }
+.sc.del { background: transparent !important; color: var(--muted) !important; box-shadow: inset 0 0 0 1px var(--muted) !important; font-size: 9.5px; text-decoration: line-through; }
+.sc.out { opacity: 0.35; }
+.sc.range { box-shadow: inset 0 -4px 0 var(--link); }
+.sc.mid { outline: 2px solid var(--fg); outline-offset: 1px; z-index: 1; }
+.sc.ins { outline: 2px dashed var(--link); outline-offset: 1px; }
+.sc.shift { background: var(--link-tint) !important; color: var(--fg) !important; }
+.sc.hit { outline: 3px solid var(--s-sparse); outline-offset: 1px; z-index: 1; }
+
+.log { margin: 0; padding-left: 20px; display: grid; gap: 4px; font-size: 13.5px; min-height: 120px; }
+.log li { color: var(--muted); }
+.log li.cur { color: var(--fg); }
+.log li::marker { font-family: var(--font-mono); font-size: 11px; }
+.log code { font-size: 12px; }
+.cost { display: flex; flex-wrap: wrap; gap: 6px; }
+.cost span { font-family: var(--font-mono); font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--soft); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--muted); }
+.legend span { display: inline-flex; gap: 6px; align-items: center; }
+.legend i { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }
+
+/* 코드 */
+pre { margin: 0; background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; overflow-x: auto; font-family: var(--font-mono); font-size: 12.5px; line-height: 1.65; }
+pre .c { color: var(--muted); }
+pre .k { color: var(--s-hash); font-weight: 600; }
+pre .hl { background: var(--data-tint); border-radius: 3px; }
+.code-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.code-grid .panel p { font-size: 14px; color: var(--muted); }
+
+/* 표 */
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { padding: 9px 10px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; }
+thead th { color: var(--muted); font-weight: 500; font-size: 12px; }
+td:first-child { font-weight: 500; white-space: nowrap; }
+td .mono { font-size: 13px; }
+
+/* 선택 가이드 */
+.steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; counter-reset: q; }
+.steps li { counter-increment: q; display: grid; grid-template-columns: 34px 1fr; gap: 4px 12px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+.steps li::before { content: counter(q); grid-row: span 2; font-family: var(--font-mono); font-weight: 600; width: 28px; height: 28px; border-radius: 50%; background: var(--fg); color: var(--bg); display: grid; place-items: center; font-size: 13px; }
+.steps .q { font-weight: 600; }
+.steps .a { font-size: 14px; color: var(--muted); }
+.steps .a b { color: var(--fg); font-weight: 600; }
+.foot { font-size: 13px; color: var(--muted); display: grid; gap: 6px; max-width: 80ch; }
+
+@media (max-width: 860px) {
+  .two, .gist, .play, .code-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 520px) {
+  body { padding: 28px 16px 56px; }
+  .panel { padding: 16px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bucket, .sc { transition: none; }
+}
+</style>
+
+<div class="wrap">
+  <header style="display:grid;gap:16px">
+    <div class="eyebrow">안드로이드 면접 질문 21 · 개념편</div>
+    <h1>SparseArray 동작 원리</h1>
+    <p class="lede">HashMap은 <b>해시로 자리를 계산</b>하고, SparseArray는 <b>정렬된 키 배열에서 이진 탐색</b>으로 찾습니다. 메모리 차이, 속도 차이, 삭제 방식까지 전부 이 한 가지 설계 차이에서 나옵니다. 아래에서 이름의 뜻, 오토박싱, 실제 동작을 차례로 보고 직접 넣고 빼 봅니다.</p>
+    <div class="gist">
+      <div class="panel">
+        <span class="tag"><i style="background:var(--s-hash)"></i>HashMap&lt;Int, V&gt;</span>
+        <div class="flow"><span>key</span><b>→</b><span>Integer 박싱</span><b>→</b><span>hashCode()</span><b>→</b><span>& (n−1)</span><b>→</b><span>버킷</span><b>→</b><span>Node 체인</span></div>
+        <p class="small muted">항목마다 <code>Node</code> 객체를 만들어 버킷 배열에 매답니다. 평균 O(1)로 바로 찾아갑니다.</p>
+      </div>
+      <div class="panel">
+        <span class="tag"><i style="background:var(--s-sparse)"></i>SparseArray&lt;V&gt;</span>
+        <div class="flow"><span>key (int 그대로)</span><b>→</b><span>mKeys[]에서 이진 탐색</span><b>→</b><span>같은 인덱스의 mValues[i]</span></div>
+        <p class="small muted">배열 두 개가 전부입니다. 항목마다 생기는 객체가 없고, 대신 찾을 때 O(log n)이 듭니다.</p>
+      </div>
+    </div>
+  </header>
+
+  <section id="sparse">
+    <div class="section-head">
+      <div class="eyebrow">개념 1 · 이름</div>
+      <h2>Sparse는 키가 드문드문하다는 뜻입니다</h2>
+      <p>키가 <code>3</code>, <code>17</code>, <code>4000</code> 세 개뿐이라고 해 봅시다. 키를 그대로 배열 인덱스로 쓰면 가장 큰 키까지 칸을 다 만들어야 합니다. 대부분이 빈칸인 이런 배열을 희소(sparse) 배열이라고 부르고, SparseArray는 실제로 있는 키만 모아 담습니다.</p>
+    </div>
+    <div class="panel">
+      <h3>키를 인덱스로 쓰는 평범한 배열 <span class="mono muted small">arrayOfNulls&lt;String&gt;(4001)</span></h3>
+      <div class="scroll"><div class="strip" id="dense-strip"></div></div>
+      <div class="verdict-row"><span>칸 <b>4,001개</b> 중 3개만 사용</span><span>배열 크기 약 <b>16,016 B</b></span></div>
+    </div>
+    <div class="panel">
+      <h3>SparseArray <span class="mono muted small">있는 키만 정렬해서 저장</span></h3>
+      <div class="scroll">
+        <div class="pair-table">
+          <div class="h">mKeys (int[])</div><div class="k">3</div><div class="k">17</div><div class="k">4000</div>
+          <div class="h">mValues (Object[])</div><div class="v">"A"</div><div class="v">"B"</div><div class="v">"C"</div>
+        </div>
+      </div>
+      <div class="verdict-row"><span>칸 <b>3쌍</b> (Android 14+는 첫 put에 9칸)</span><span>배열 두 개 합쳐 <b>96 B</b> (13 이하는 11칸씩 112 B)</span><span class="muted">대신 키 위치를 계산할 수 없어서 찾아야 합니다 → 이진 탐색</span></div>
+    </div>
+  </section>
+
+  <section id="boxing">
+    <div class="section-head">
+      <div class="eyebrow">개념 2 · 오토박싱</div>
+      <h2>int는 값이고, Integer는 객체입니다</h2>
+      <p>Kotlin의 <code>Int</code>는 평소에는 원시 타입 <code>int</code>로 컴파일됩니다. 하지만 제네릭 <code>HashMap&lt;Int, V&gt;</code>의 키 자리에는 객체만 들어갈 수 있어서 <code>Integer.valueOf(key)</code>로 감싸집니다. 이것이 오토박싱입니다.</p>
+    </div>
+    <div class="two">
+      <div class="panel box-fig">
+        <h3>SparseArray의 키 <span class="mono muted small">int[]</span></h3>
+        <div class="cells"><div class="c-head">헤더</div><div class="c-val">1042</div><div class="c-val">2087</div><div class="c-val">5120</div></div>
+        <p class="small muted">칸에 숫자 자체가 들어 있습니다. 칸당 4바이트, 추가 객체 없음.</p>
+      </div>
+      <div class="panel box-fig">
+        <h3>HashMap의 키 <span class="mono muted small">Node.key → Integer</span></h3>
+        <div class="cells"><div class="c-ref">→ ①</div><div class="c-ref">→ ②</div><div class="c-ref">→ ③</div></div>
+        <div class="arrow-down">↓ 칸에는 참조만, 숫자는 각각 다른 객체 안에</div>
+        <div class="objs">
+          <div class="obj"><div class="cells"><div class="c-head">헤더 8B</div><div class="c-val">1042</div><div class="c-pad"></div></div><small>① Integer · 16B</small></div>
+          <div class="obj"><div class="cells"><div class="c-head">헤더 8B</div><div class="c-val">2087</div><div class="c-pad"></div></div><small>② Integer · 16B</small></div>
+          <div class="obj"><div class="cells"><div class="c-head">헤더 8B</div><div class="c-val">5120</div><div class="c-pad"></div></div><small>③ Integer · 16B</small></div>
+        </div>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>박싱이 생기는 순간</h3>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>코드</th><th>HashMap&lt;Int, String&gt;</th><th>SparseArray&lt;String&gt;</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">map[1042] = "A"</td><td>키를 <code>Integer</code>로 박싱 + <code>Node</code> 생성</td><td>박싱 없음. 배열 칸에 <code>1042</code> 기록</td></tr>
+            <tr><td class="mono">map[1042]</td><td>조회할 때도 키를 박싱합니다. 짧게 살다 버려지는 객체가 GC 부담이 됩니다</td><td><code>get(int)</code>라서 할당 없음</td></tr>
+            <tr><td class="mono">map[42]</td><td><code>-128~127</code>은 <code>Integer</code> 캐시를 재사용해서 새 객체 없음</td><td>동일하게 할당 없음</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="small muted">값까지 숫자라면 <code>HashMap&lt;Int, Int&gt;</code>는 값도 박싱합니다. <code>SparseIntArray</code>는 키와 값을 모두 <code>int[]</code>에 담아 둘 다 피합니다.</p>
+    </div>
+  </section>
+
+  <section id="play">
+    <div class="section-head">
+      <div class="eyebrow">개념 3 · 직접 해 보기</div>
+      <h2>같은 연산을 두 자료구조에 동시에 실행</h2>
+      <p>키를 입력하고 연산을 누르면 각 구조가 하는 일을 한 단계씩 보여 줍니다. 처음에는 키 7, 42, 108, 900, 3000이 들어 있습니다. HashMap 테이블은 학습용으로 기본값과 같은 16칸에서 시작합니다.</p>
+    </div>
+
+    <div class="controls">
+      <div class="ctl">
+        <label for="key-in">키 (0~99999)</label>
+        <input id="key-in" type="number" min="0" max="99999" value="23" inputmode="numeric">
+      </div>
+      <div class="btns">
+        <button class="op" type="button" data-op="put">put</button>
+        <button class="op" type="button" data-op="get">get</button>
+        <button class="op" type="button" data-op="remove">remove</button>
+        <button class="op ghost" type="button" data-op="size">size()</button>
+        <button class="op ghost" type="button" data-op="reset">처음 상태로</button>
+      </div>
+      <div class="chips">
+        <span>해 볼 만한 것</span>
+        <button class="chip" type="button" data-try="put:23"><code>put 23</code> 7과 같은 버킷</button>
+        <button class="chip" type="button" data-try="put:5"><code>put 5</code> 맨 앞에 삽입</button>
+        <button class="chip" type="button" data-try="remove:42"><code>remove 42</code> 지연 삭제</button>
+        <button class="chip" type="button" data-try="put:30"><code>put 30</code> 42 삭제 후 DELETED 칸 재사용</button>
+        <button class="chip" type="button" data-try="get:900"><code>get 900</code> 이진 탐색</button>
+      </div>
+    </div>
+
+    <div class="play">
+      <div class="panel">
+        <div class="pane-top">
+          <span class="tag"><i style="background:var(--s-hash)"></i>HashMap</span>
+          <span class="stat" id="hm-stat"></span>
+        </div>
+        <div class="formula" id="hm-formula">index = (h ^ (h &gt;&gt;&gt; 16)) &amp; (n − 1)</div>
+        <div class="buckets" id="hm-view"></div>
+        <div class="legend">
+          <span><i style="background:var(--link-tint);box-shadow:inset 0 0 0 1px var(--link)"></i>Node 객체</span>
+          <span><i style="background:var(--data-tint);box-shadow:inset 0 0 0 1px var(--data)"></i>계산된 버킷</span>
+        </div>
+        <ol class="log" id="hm-log"></ol>
+        <div class="cost" id="hm-cost"></div>
+      </div>
+      <div class="panel">
+        <div class="pane-top">
+          <span class="tag"><i style="background:var(--s-sparse)"></i>SparseArray</span>
+          <span class="stat" id="sa-stat"></span>
+        </div>
+        <div class="formula">i = binarySearch(mKeys, mSize, key) · 없으면 ~삽입위치 반환</div>
+        <div class="scroll"><div class="sa" id="sa-view"></div></div>
+        <div class="legend">
+          <span><i style="box-shadow:inset 0 -4px 0 var(--link), inset 0 0 0 1px var(--line)"></i>탐색 범위 lo~hi</span>
+          <span><i style="outline:2px solid var(--fg);outline-offset:-2px"></i>mid</span>
+          <span><i style="background:var(--link-tint)"></i>한 칸씩 밀린 원소</span>
+          <span><i style="box-shadow:inset 0 0 0 1px var(--muted)"></i>DELETED</span>
+        </div>
+        <ol class="log" id="sa-log"></ol>
+        <div class="cost" id="sa-cost"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="source">
+    <div class="section-head">
+      <div class="eyebrow">개념 4 · 소스 읽기</div>
+      <h2>AOSP 코드에서 핵심만</h2>
+      <p><code>android.util.SparseArray</code>의 실제 로직을 줄인 것입니다. 위에서 본 동작이 그대로 코드에 있습니다.</p>
+    </div>
+    <div class="code-grid">
+      <div class="panel">
+        <h3>get · 이진 탐색 한 번</h3>
+<pre><span class="k">public</span> E get(<span class="k">int</span> key, E valueIfKeyNotFound) {
+    <span class="k">int</span> i = <span class="hl">ContainerHelpers.binarySearch(mKeys, mSize, key)</span>;
+    <span class="k">if</span> (i &lt; 0 || mValues[i] == DELETED) {
+        <span class="k">return</span> valueIfKeyNotFound;
+    }
+    <span class="k">return</span> (E) mValues[i];
+}</pre>
+        <p>못 찾으면 <code>~lo</code>(비트 반전)를 돌려줍니다. 항상 음수라서 "없음"을 표시하면서 동시에 들어갈 자리도 알려 줍니다. <code>~(-3) = 2</code>처럼 다시 뒤집으면 삽입 위치가 나옵니다.</p>
+      </div>
+      <div class="panel">
+        <h3>remove · 표시만 하고 미루기</h3>
+<pre><span class="k">public void</span> delete(<span class="k">int</span> key) {
+    <span class="k">int</span> i = ContainerHelpers.binarySearch(mKeys, mSize, key);
+    <span class="k">if</span> (i &gt;= 0 &amp;&amp; mValues[i] != DELETED) {
+        <span class="hl">mValues[i] = DELETED;</span>
+        <span class="hl">mGarbage = true;</span>
+    }
+}</pre>
+        <p>삭제할 때마다 배열을 당기면 매번 O(n)입니다. 그래서 자리를 비워 두기만 하고, 인덱스가 필요한 <code>size()</code>, <code>keyAt()</code>, <code>valueAt()</code> 같은 호출이 올 때 <code>gc()</code>로 한 번에 압축합니다.</p>
+      </div>
+      <div class="panel">
+        <h3>put · 찾고, 재사용하고, 밀어 넣기</h3>
+<pre><span class="k">public void</span> put(<span class="k">int</span> key, E value) {
+    <span class="k">int</span> i = ContainerHelpers.binarySearch(mKeys, mSize, key);
+    <span class="k">if</span> (i &gt;= 0) { mValues[i] = value; <span class="k">return</span>; }   <span class="c">// 있으면 교체</span>
+    i = ~i;                                         <span class="c">// 삽입 위치</span>
+    <span class="k">if</span> (i &lt; mSize &amp;&amp; mValues[i] == DELETED) {      <span class="c">// 빈 자리 재사용</span>
+        mKeys[i] = key; mValues[i] = value; <span class="k">return</span>;
+    }
+    <span class="k">if</span> (mGarbage &amp;&amp; mSize &gt;= mKeys.length) {       <span class="c">// 꽉 찼으면 먼저 압축</span>
+        gc();
+        i = ~ContainerHelpers.binarySearch(mKeys, mSize, key);
+    }
+    mKeys = <span class="hl">GrowingArrayUtils.insert(mKeys, mSize, i, key)</span>;
+    mValues = GrowingArrayUtils.insert(mValues, mSize, i, value);
+    mSize++;
+}</pre>
+        <p><code>GrowingArrayUtils.insert</code>는 <code>System.arraycopy</code>로 i 뒤를 한 칸씩 밀고, 자리가 없으면 크기를 두 배로 늘린 새 배열에 복사합니다. 키 순서를 유지해야 이진 탐색이 성립하기 때문입니다.</p>
+      </div>
+      <div class="panel">
+        <h3>gc · DELETED를 건너뛰며 앞으로 당기기</h3>
+<pre><span class="k">private void</span> gc() {
+    <span class="k">int</span>[] keys = mKeys;
+    Object[] values = mValues;
+    <span class="k">int</span> o = 0;
+    <span class="k">for</span> (<span class="k">int</span> i = 0; i &lt; mSize; i++) {
+        <span class="k">if</span> (values[i] != DELETED) {
+            <span class="k">if</span> (i != o) {
+                keys[o] = keys[i];
+                values[o] = values[i];
+                values[i] = <span class="k">null</span>;
+            }
+            o++;
+        }
+    }
+    mGarbage = <span class="k">false</span>;
+    mSize = o;
+}</pre>
+        <p>배열을 새로 만들지 않고 제자리에서 당깁니다. 그래서 배열 크기(용량)는 줄어들지 않습니다. 이 <code>gc()</code>는 GC(가비지 컬렉터)와는 무관한 SparseArray 내부 메서드입니다.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="compare">
+    <div class="section-head">
+      <div class="eyebrow">개념 5 · 한눈에 비교</div>
+      <h2>연산별 차이</h2>
+    </div>
+    <div class="panel scroll">
+      <table>
+        <thead><tr><th>항목</th><th>HashMap&lt;Int, V&gt;</th><th>SparseArray&lt;V&gt;</th></tr></thead>
+        <tbody>
+          <tr><td>조회</td><td>평균 O(1). 충돌하면 체인을 따라감. 한 버킷에 8개가 쌓이고 테이블이 64칸 이상이면 트리로 바뀜</td><td>O(log n) 이진 탐색</td></tr>
+          <tr><td>새 키 삽입</td><td>평균 O(1). 용량×0.75 초과 시 테이블 두 배 + 전체 재배치</td><td>O(n). 중간 삽입은 뒤쪽을 밀어야 함. 오름차순 삽입은 끝에 붙어서 빠름</td></tr>
+          <tr><td>삭제</td><td>Node를 체인에서 떼어냄. Node와 Integer는 GC 대상</td><td>DELETED 표시 후 나중에 <code>gc()</code>로 압축. 용량은 유지</td></tr>
+          <tr><td>항목당 객체</td><td>Node 1개 + Integer 1개 (캐시 범위 밖일 때)</td><td>없음</td></tr>
+          <tr><td>순회 순서</td><td>보장 안 됨</td><td>키 오름차순. <code>keyAt(i)</code>, <code>valueAt(i)</code>로 반복자 할당 없이 순회</td></tr>
+          <tr><td>null 키</td><td>1개 허용</td><td>불가 (키가 int)</td></tr>
+          <tr><td>값으로 찾기</td><td><code>containsValue</code>는 <code>equals</code> 비교</td><td><code>indexOfValue</code>는 <code>==</code> 참조 비교. 내용이 같은 다른 객체는 못 찾음</td></tr>
+          <tr><td>인터페이스</td><td><code>Map</code> 구현. 컬렉션 API와 호환</td><td><code>Map</code> 아님. androidx.core의 <code>forEach</code>, <code>keyIterator</code> 같은 확장 일부만 있음</td></tr>
+          <tr><td>단위 테스트</td><td>순수 JVM에서 동작</td><td><code>android.util</code>라서 로컬 테스트는 Robolectric 필요</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="family">
+    <div class="section-head">
+      <div class="eyebrow">개념 6 · 비슷한 자료구조</div>
+      <h2>상황에 맞는 친척들</h2>
+    </div>
+    <div class="panel scroll">
+      <table>
+        <thead><tr><th>클래스</th><th>키 → 값</th><th>특징</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">SparseIntArray</td><td>int → int</td><td>값도 <code>int[]</code>. 박싱이 전혀 없음</td></tr>
+          <tr><td class="mono">SparseBooleanArray</td><td>int → boolean</td><td>체크된 position 같은 상태 저장에 적합</td></tr>
+          <tr><td class="mono">SparseLongArray</td><td>int → long</td><td>값이 long일 때</td></tr>
+          <tr><td class="mono">LongSparseArray</td><td>long → V</td><td>키가 long일 때 (DB id 등). androidx 버전도 있음</td></tr>
+          <tr><td class="mono">SparseArrayCompat</td><td>int → V</td><td>androidx.collection. 같은 원리의 순수 Kotlin 구현이라 JVM 테스트에서 그대로 사용</td></tr>
+          <tr><td class="mono">ArrayMap</td><td>K → V</td><td>키 타입 제한 없음. 키의 해시를 정렬된 <code>int[]</code>에 두고 이진 탐색. 정수 키는 여전히 박싱됨</td></tr>
+          <tr><td class="mono">IntObjectMap</td><td>int → V</td><td>androidx.collection 1.4+. 박싱 없는 해시 테이블(오픈 어드레싱)이라 평균 O(1) 조회</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="choose">
+    <div class="section-head">
+      <div class="eyebrow">개념 7 · 고르는 순서</div>
+      <h2>무엇을 쓸지 정하는 질문</h2>
+      <p>위에서부터 차례로 답해 보세요.</p>
+    </div>
+    <ol class="steps">
+      <li><span class="q">키가 int나 long인가요?</span><span class="a">아니면 <b>HashMap</b>. 항목이 수백 개 이하로 작으면 메모리를 아끼는 <b>ArrayMap</b>도 후보입니다.</span></li>
+      <li><span class="q">다른 API에 <code>Map</code>으로 넘겨야 하나요?</span><span class="a">그렇다면 <b>HashMap</b>. SparseArray는 <code>Map</code>을 구현하지 않습니다.</span></li>
+      <li><span class="q">항목이 수천 개를 넘거나 중간 삽입·삭제가 아주 잦나요?</span><span class="a">그렇다면 <b>HashMap</b>이나 <b>IntObjectMap</b>. 공식 문서는 수백 개 정도까지는 성능 차이가 50% 미만이라고 설명합니다.</span></li>
+      <li><span class="q">값도 원시 타입인가요?</span><span class="a">int면 <b>SparseIntArray</b>, boolean이면 <b>SparseBooleanArray</b>, long이면 <b>SparseLongArray</b>. 키가 long이면 <b>LongSparseArray</b>.</span></li>
+      <li><span class="q">순수 JVM 단위 테스트에서도 쓰나요?</span><span class="a">그렇다면 <b>SparseArrayCompat</b>. 아니면 <b>SparseArray</b>로 충분합니다.</span></li>
+    </ol>
+    <div class="foot">
+      <p>메모리 숫자 비교는 <a href="https://claude.ai/artifact/XA1FADjXrwygG9g4woaPg6" target="_blank" rel="noopener">SparseArray vs HashMap 메모리</a> 페이지에 있습니다.</p>
+      <p>참고: <a href="https://developer.android.com/reference/android/util/SparseArray" target="_blank" rel="noopener">SparseArray 문서</a> · <a href="https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/core/java/android/util/SparseArray.java" target="_blank" rel="noopener">SparseArray 소스</a> · <a href="https://android.googlesource.com/platform/libcore/+/refs/heads/main/ojluni/src/main/java/java/util/HashMap.java" target="_blank" rel="noopener">Android HashMap 소스</a> · <a href="https://developer.android.com/reference/kotlin/androidx/collection/package-summary" target="_blank" rel="noopener">androidx.collection</a></p>
+    </div>
+  </section>
+</div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const fmt = n => n.toLocaleString('ko-KR');
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const DELAY = reduce ? 0 : 650;
+  const MAX = 24;
+
+  // ---- 희소 배열 그림 ----
+  (() => {
+    const on = { 3: 'A', 17: 'B', 4000: 'C' };
+    const slot = i => `<div class="slot${on[i] ? ' on' : ''}"><div class="box">${on[i] || ''}</div><div class="ix">${i}</div></div>`;
+    let h = '';
+    for (let i = 0; i <= 19; i++) h += slot(i);
+    h += '<div class="gap-mark">… 빈칸 3,978개 …</div>';
+    for (let i = 3998; i <= 4000; i++) h += slot(i);
+    $('dense-strip').innerHTML = h;
+  })();
+
+  // ---- 상태 ----
+  const INIT = [7, 42, 108, 900, 3000];
+  let HM, SA;
+  const valOf = k => `v${k}`;
+  const cached = k => k >= -128 && k <= 127;
+  const spread = h => (h ^ (h >>> 16));
+
+  function reset() {
+    HM = { cap: 16, table: Array.from({ length: 16 }, () => []), size: 0 };
+    // Android 14부터 SparseArray()는 this(0): 공유 빈 배열에서 시작한다
+    SA = { keys: [], vals: [], size: 0, garbage: false };
+    INIT.forEach(k => { hmPut(k, true); saPut(k, true); });
+  }
+  const cloneHM = () => ({ cap: HM.cap, table: HM.table.map(c => c.map(n => ({ ...n }))), size: HM.size });
+  const cloneSA = () => ({ keys: SA.keys.slice(), vals: SA.vals.slice(), size: SA.size, garbage: SA.garbage });
+
+  // ---- HashMap ----
+  function hmPut(k, silent) {
+    const F = [], cost = { cmp: 0, obj: 0 };
+    const h = spread(k), idx = h & (HM.cap - 1);
+    if (!silent) {
+      F.push({ s: cloneHM(), t: cached(k) ? `키 ${k}는 −128~127이라 캐시된 <code>Integer</code>를 재사용` : `키를 <code>Integer(${k})</code> 객체로 박싱 (새 객체)` });
+      F.push({ s: cloneHM(), b: idx, t: `<code>hashCode()=${k}</code> → <code>${k} ^ (${k}>>>16) = ${h}</code> → <code>${h} & ${HM.cap - 1} = ${idx}</code>번 버킷` });
+    }
+    const chain = HM.table[idx];
+    for (let j = 0; j < chain.length; j++) {
+      cost.cmp++;
+      if (chain[j].k === k) {
+        chain[j].v = valOf(k);
+        if (!silent) F.push({ s: cloneHM(), b: idx, n: k, t: `Node(${k})와 키가 같음 → 값만 교체. 새 Node 없음` });
+        return { F, cost };
+      }
+      if (!silent) F.push({ s: cloneHM(), b: idx, n: chain[j].k, t: `Node(${chain[j].k})와 비교: <code>${chain[j].k} ≠ ${k}</code> → <code>next</code>로 이동 (해시 충돌)` });
+    }
+    chain.push({ k, v: valOf(k) });
+    HM.size++;
+    cost.obj += 1 + (cached(k) ? 0 : 1);
+    if (!silent) F.push({ s: cloneHM(), b: idx, nw: k, t: chain.length > 1 ? `체인 끝에 새 <code>Node(${k})</code>를 연결` : `빈 버킷에 새 <code>Node(${k})</code> 저장` });
+    const thr = HM.cap * 0.75;
+    if (HM.size > thr) {
+      const old = HM.table;
+      HM.cap *= 2;
+      HM.table = Array.from({ length: HM.cap }, () => []);
+      old.forEach(c => c.forEach(n => HM.table[spread(n.k) & (HM.cap - 1)].push(n)));
+      cost.obj++;
+      if (!silent) F.push({ s: cloneHM(), t: `size ${HM.size} > 임계값 ${thr} (${HM.cap / 2}×0.75) → 테이블을 ${HM.cap}칸으로 늘리고 모든 Node를 다시 배치` });
+    }
+    return { F, cost };
+  }
+  function hmGet(k) {
+    const F = [], cost = { cmp: 0, obj: 0 };
+    const h = spread(k), idx = h & (HM.cap - 1);
+    F.push({ s: cloneHM(), t: cached(k) ? `조회 키 ${k}: 캐시된 Integer 사용` : `조회할 때도 키를 <code>Integer(${k})</code>로 박싱 (곧 버려지는 객체)` });
+    if (!cached(k)) cost.obj++;
+    F.push({ s: cloneHM(), b: idx, t: `<code>${h} & ${HM.cap - 1} = ${idx}</code>번 버킷으로 바로 이동` });
+    for (const n of HM.table[idx]) {
+      cost.cmp++;
+      if (n.k === k) { F.push({ s: cloneHM(), b: idx, n: k, t: `Node(${k}) 발견 → <code>"${n.v}"</code> 반환` }); return { F, cost }; }
+      F.push({ s: cloneHM(), b: idx, n: n.k, t: `Node(${n.k}) ≠ ${k} → 다음` });
+    }
+    F.push({ s: cloneHM(), b: idx, t: `체인 끝까지 없음 → <code>null</code>` });
+    return { F, cost };
+  }
+  function hmRemove(k) {
+    const F = [], cost = { cmp: 0, obj: 0 };
+    const idx = spread(k) & (HM.cap - 1);
+    F.push({ s: cloneHM(), b: idx, t: `해시로 <code>${idx}</code>번 버킷 찾기` });
+    const chain = HM.table[idx];
+    for (let j = 0; j < chain.length; j++) {
+      cost.cmp++;
+      if (chain[j].k === k) {
+        F.push({ s: cloneHM(), b: idx, n: k, t: `Node(${k}) 발견` });
+        chain.splice(j, 1); HM.size--;
+        F.push({ s: cloneHM(), b: idx, t: `체인에서 떼어냄. 이 Node${cached(k) ? '' : '와 Integer'}는 GC가 회수` });
+        return { F, cost };
+      }
+    }
+    F.push({ s: cloneHM(), b: idx, t: `키 ${k} 없음 → 변화 없음` });
+    return { F, cost };
+  }
+  function hmSize() {
+    return { F: [{ s: cloneHM(), t: `<code>size</code> 필드를 그대로 반환 → ${HM.size}` }], cost: { cmp: 0, obj: 0 } };
+  }
+
+  // ---- SparseArray ----
+  function bsearch(k, F, cost, silent) {
+    let lo = 0, hi = SA.size - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >>> 1, mv = SA.keys[mid];
+      cost.cmp++;
+      const rel = mv < k ? `< ${k} → 오른쪽 절반` : mv > k ? `> ${k} → 왼쪽 절반` : `= ${k} → 찾음`;
+      if (!silent) F.push({ s: cloneSA(), lo, hi, mid, t: `lo=${lo}, hi=${hi}, mid=${mid}: <code>mKeys[${mid}]=${mv}</code> ${rel}` });
+      if (mv < k) lo = mid + 1; else if (mv > k) hi = mid - 1; else return mid;
+    }
+    if (!silent) F.push({ s: cloneSA(), ins: lo, t: `없음 → <code>~${lo} = ${~lo}</code> 반환. 들어갈 자리는 인덱스 ${lo}` });
+    return ~lo;
+  }
+  function gc(F, silent) {
+    let o = 0;
+    for (let i = 0; i < SA.size; i++) {
+      if (SA.vals[i] !== 'DELETED') {
+        if (i !== o) { SA.keys[o] = SA.keys[i]; SA.vals[o] = SA.vals[i]; SA.vals[i] = null; }
+        o++;
+      }
+    }
+    const removed = SA.size - o;
+    SA.size = o; SA.garbage = false;
+    if (!silent) F.push({ s: cloneSA(), t: `<code>gc()</code>: DELETED ${removed}칸을 건너뛰며 앞으로 당김. mSize=${o}, 배열 용량 ${SA.keys.length}칸은 그대로` });
+  }
+  function saPut(k, silent) {
+    const F = [], cost = { cmp: 0, move: 0, obj: 0 };
+    let i = bsearch(k, F, cost, silent);
+    if (i >= 0) {
+      const was = SA.vals[i];
+      SA.vals[i] = valOf(k);
+      if (!silent) F.push({ s: cloneSA(), hit: i, t: was === 'DELETED' ? `같은 키가 DELETED 상태로 남아 있음 → 값만 다시 채움` : `같은 키 → <code>mValues[${i}]</code> 값만 교체` });
+      return { F, cost };
+    }
+    i = ~i;
+    if (i < SA.size && SA.vals[i] === 'DELETED') {
+      SA.keys[i] = k; SA.vals[i] = valOf(k);
+      if (!silent) F.push({ s: cloneSA(), hit: i, t: `인덱스 ${i}가 DELETED 자리 → 키·값을 덮어써서 재사용. 이동 0칸` });
+      return { F, cost };
+    }
+    if (SA.garbage && SA.size >= SA.keys.length) {
+      if (!silent) F.push({ s: cloneSA(), t: `배열이 꽉 찼지만 DELETED가 있음 → 늘리기 전에 <code>gc()</code>` });
+      gc(F, silent);
+      i = ~bsearch(k, F, cost, true);
+      if (!silent) F.push({ s: cloneSA(), ins: i, t: `압축 후 다시 탐색 → 삽입 위치 ${i}` });
+    }
+    if (SA.size + 1 > SA.keys.length) {
+      // growSize 후 newUnpaddedArray가 8B 정렬로 남는 칸까지 쓴다 (8 → 9칸)
+      const req = SA.size <= 4 ? 8 : SA.size * 2;
+      const nc = (Math.ceil((12 + 4 * req) / 8) * 8 - 12) / 4;
+      SA.keys = SA.keys.concat(Array(nc - SA.keys.length).fill(0));
+      SA.vals = SA.vals.concat(Array(nc - SA.vals.length).fill(null));
+      cost.obj += 2;
+      if (!silent) F.push({ s: cloneSA(), ins: i, t: `빈칸 없음 → ${req}칸을 요청해 ${nc}칸짜리 새 배열 2개를 만들고 복사` });
+    }
+    const moves = SA.size - i;
+    for (let j = SA.size; j > i; j--) { SA.keys[j] = SA.keys[j - 1]; SA.vals[j] = SA.vals[j - 1]; }
+    cost.move += moves;
+    if (!silent && moves > 0) {
+      const s = cloneSA(); s.keys[i] = null; s.vals[i] = null; s.size++;
+      F.push({ s, shift: [i + 1, SA.size], ins: i, t: `<code>System.arraycopy</code>로 인덱스 ${i}~${SA.size - 1}의 ${moves}칸을 오른쪽으로 한 칸씩 밀기` });
+    }
+    SA.keys[i] = k; SA.vals[i] = valOf(k); SA.size++;
+    if (!silent) F.push({ s: cloneSA(), hit: i, t: `<code>mKeys[${i}]=${k}</code>, <code>mValues[${i}]="${valOf(k)}"</code> 기록. ${moves ? '' : '끝에 붙여서 이동 없음. '}새 객체 ${cost.obj ? '배열 2개' : '없음'}` });
+    return { F, cost };
+  }
+  function saGet(k) {
+    const F = [], cost = { cmp: 0, move: 0, obj: 0 };
+    const i = bsearch(k, F, cost);
+    if (i >= 0 && SA.vals[i] !== 'DELETED') F.push({ s: cloneSA(), hit: i, t: `같은 인덱스 <code>mValues[${i}]</code> → <code>"${SA.vals[i]}"</code> 반환. 할당 없음` });
+    else if (i >= 0) F.push({ s: cloneSA(), hit: i, t: `키는 있지만 값이 DELETED → <code>null</code>` });
+    else F.push({ s: cloneSA(), t: `없음 → <code>null</code>` });
+    return { F, cost };
+  }
+  function saRemove(k) {
+    const F = [], cost = { cmp: 0, move: 0, obj: 0 };
+    const i = bsearch(k, F, cost);
+    if (i >= 0 && SA.vals[i] !== 'DELETED') {
+      SA.vals[i] = 'DELETED'; SA.garbage = true;
+      F.push({ s: cloneSA(), hit: i, t: `<code>mValues[${i}] = DELETED</code>, <code>mGarbage = true</code>. 배열은 당기지 않음 (이동 0칸)` });
+    } else F.push({ s: cloneSA(), t: `삭제할 키 없음 → 변화 없음` });
+    return { F, cost };
+  }
+  function saSize() {
+    const F = [], cost = { cmp: 0, move: 0, obj: 0 };
+    if (SA.garbage) {
+      F.push({ s: cloneSA(), t: `<code>mGarbage</code>가 true → 정확한 크기를 내기 전에 <code>gc()</code>` });
+      const before = SA.size;
+      gc(F);
+      cost.move = before - SA.size;
+    }
+    F.push({ s: cloneSA(), t: `<code>mSize</code> 반환 → ${SA.size}` });
+    return { F, cost };
+  }
+
+  // ---- 렌더 ----
+  function drawHM(f) {
+    const s = f.s;
+    $('hm-view').innerHTML = s.table.map((c, i) => `<div class="bucket${f.b === i ? ' mark' : ''}"><span class="bi">[${i}]</span>${c.map(n =>
+      `<span class="node${f.n === n.k ? ' mark' : ''}${f.nw === n.k ? ' new' : ''}">${n.k}<small>${cached(n.k) ? '캐시' : '+Integer'}</small></span>`).join('')}</div>`).join('');
+    const objs = s.size + s.table.flat().filter(n => !cached(n.k)).length;
+    $('hm-stat').innerHTML = `size <b>${s.size}</b> · 테이블 <b>${s.cap}</b>칸 · 임계값 <b>${s.cap * 0.75}</b> · 항목용 객체 <b>${objs}</b>개`;
+  }
+  function drawSA(f) {
+    const s = f.s, cap = s.keys.length;
+    const cls = (i, row) => {
+      const c = ['sc', row];
+      const used = i < s.size;
+      if (used && s.keys[i] !== null) c.push('used');
+      if (!used) c.push('out');
+      if (row === 'v' && used && s.vals[i] === 'DELETED') c.push('del');
+      if (f.lo !== undefined && i >= f.lo && i <= f.hi) c.push('range');
+      if (f.mid === i) c.push('mid');
+      if (f.ins === i) c.push('ins');
+      if (f.hit === i) c.push('hit');
+      if (f.shift && i >= f.shift[0] && i <= f.shift[1]) c.push('shift');
+      return c.join(' ');
+    };
+    let ix = '', ks = '', vs = '';
+    for (let i = 0; i < cap; i++) {
+      const used = i < s.size;
+      ix += `<div class="sc ix">${i}</div>`;
+      ks += `<div class="${cls(i, 'k')}">${used && s.keys[i] !== null ? s.keys[i] : ''}</div>`;
+      const v = used ? s.vals[i] : null;
+      vs += `<div class="${cls(i, 'v')}">${v === 'DELETED' ? 'DELETED' : v ? v : ''}</div>`;
+    }
+    $('sa-view').innerHTML = `<span class="rl">index</span><div class="sa-row">${ix}</div><span class="rl">mKeys</span><div class="sa-row">${ks}</div><span class="rl">mValues</span><div class="sa-row">${vs}</div>`;
+    $('sa-stat').innerHTML = `mSize <b>${s.size}</b> · 용량 <b>${cap}</b>칸 · mGarbage <b>${s.garbage}</b> · 항목용 객체 <b>0</b>개`;
+  }
+  function costHM(c, done) { $('hm-cost').innerHTML = done ? `<span>키 비교 ${c.cmp}회</span><span>새 객체 ${c.obj}개</span>` : ''; }
+  function costSA(c, done) { $('sa-cost').innerHTML = done ? `<span>키 비교 ${c.cmp}회</span><span>원소 이동 ${c.move}칸</span><span>새 객체 ${c.obj ? '배열 ' + c.obj + '개' : '0개'}</span>` : ''; }
+
+  let timers = [];
+  const buttons = () => document.querySelectorAll('button.op, button.chip');
+  function play(logId, frames, draw, onDone) {
+    const log = $(logId);
+    log.innerHTML = frames.map(f => `<li hidden>${f.t}</li>`).join('');
+    const items = [...log.children];
+    frames.forEach((f, i) => {
+      timers.push(setTimeout(() => {
+        draw(f);
+        items.forEach((li, j) => { li.hidden = j > i; li.classList.toggle('cur', j === i); });
+        if (i === frames.length - 1) onDone();
+      }, i * DELAY));
+    });
+  }
+  function run(op, k) {
+    timers.forEach(clearTimeout); timers = [];
+    if (op === 'reset') { reset(); idle(); return; }
+    if (op === 'put' && HM.size >= MAX && !HM.table.flat().some(n => n.k === k)) {
+      $('hm-log').innerHTML = `<li class="cur">이 데모는 ${MAX}개까지 넣을 수 있습니다. 먼저 remove 하거나 처음 상태로 되돌리세요.</li>`;
+      $('sa-log').innerHTML = ''; return;
+    }
+    const h = { put: () => hmPut(k), get: () => hmGet(k), remove: () => hmRemove(k), size: hmSize }[op]();
+    const s = { put: () => saPut(k), get: () => saGet(k), remove: () => saRemove(k), size: saSize }[op]();
+    buttons().forEach(b => b.disabled = true);
+    let left = 2;
+    const done = () => { if (--left === 0) buttons().forEach(b => b.disabled = false); };
+    costHM(h.cost, false); costSA(s.cost, false);
+    play('hm-log', h.F, drawHM, () => { costHM(h.cost, true); done(); });
+    play('sa-log', s.F, drawSA, () => { costSA(s.cost, true); done(); });
+  }
+  function idle() {
+    drawHM({ s: cloneHM() }); drawSA({ s: cloneSA() });
+    $('hm-log').innerHTML = `<li class="cur">키 7, 42, 108, 900, 3000이 들어 있습니다. 각각 <code>Node</code> + <code>Integer</code> 객체가 하나씩 있습니다 (7, 42, 108은 Integer 캐시 공유).</li>`;
+    $('sa-log').innerHTML = `<li class="cur">같은 키가 오름차순으로 <code>mKeys</code>에, 값은 같은 인덱스의 <code>mValues</code>에 있습니다. 용량 ${SA.keys.length}칸 중 ${SA.size}칸 사용 (Android 14부터 빈 배열로 시작해 첫 put에서 8칸을 요청하고, 정렬로 남는 칸까지 써서 9칸).</li>`;
+    $('hm-cost').innerHTML = ''; $('sa-cost').innerHTML = '';
+  }
+
+  const keyIn = $('key-in');
+  const readKey = () => {
+    const v = Math.trunc(Number(keyIn.value));
+    if (!Number.isFinite(v) || v < 0 || v > 99999) { keyIn.setCustomValidity('0~99999 사이 정수를 입력하세요'); keyIn.reportValidity(); return null; }
+    keyIn.setCustomValidity(''); return v;
+  };
+  document.querySelectorAll('button.op').forEach(b => b.addEventListener('click', () => {
+    const op = b.dataset.op;
+    if (op === 'reset' || op === 'size') return run(op);
+    const k = readKey(); if (k !== null) run(op, k);
+  }));
+  document.querySelectorAll('[data-try]').forEach(b => b.addEventListener('click', () => {
+    const [op, k] = b.dataset.try.split(':');
+    keyIn.value = k; run(op, +k);
+  }));
+  keyIn.addEventListener('keydown', e => { if (e.key === 'Enter') { const k = readKey(); if (k !== null) run('put', k); } });
+
+  reset(); idle();
+})();
+</script>

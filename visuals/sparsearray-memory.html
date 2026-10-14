@@ -1,0 +1,86 @@
+<div id="sparse-memory-visual">
+  <style>
+    #sparse-memory-visual .comparison {display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:16px}
+    #sparse-memory-visual .panel {min-width:0}
+    #sparse-memory-visual .box {border:1px solid var(--border);border-radius:8px;padding:12px;margin:8px 0}
+    #sparse-memory-visual .header {background:var(--muted);color:var(--foreground);padding:6px 8px;border-radius:4px;margin-bottom:8px}
+    #sparse-memory-visual .node {background:color-mix(in srgb,var(--orange) 8%,transparent)}
+    #sparse-memory-visual .integer {background:color-mix(in srgb,var(--orange) 12%,transparent);padding:8px;border-radius:4px;margin-top:8px}
+    #sparse-memory-visual .array {background:color-mix(in srgb,var(--green) 8%,transparent)}
+    #sparse-memory-visual .fields {display:grid;grid-template-columns:auto 1fr;gap:4px 12px}
+    #sparse-memory-visual .label {font-weight:500}
+    #sparse-memory-visual .shared {display:flex;flex-wrap:wrap;gap:8px}
+    #sparse-memory-visual .shared span {border:1px solid var(--border);border-radius:4px;padding:8px 12px}
+    #sparse-memory-visual .summary {padding:12px 0;border-top:1px solid var(--border);margin-top:12px}
+    #sparse-memory-visual .control {max-width:280px}
+    #sparse-memory-visual .arrow {text-align:center;padding:6px}
+    #sparse-memory-visual td,#sparse-memory-visual th {padding:8px;text-align:center}
+    @media(max-width:600px){#sparse-memory-visual .comparison{grid-template-columns:1fr;gap:16px}}
+  </style>
+  <h2>같은 키·값, 다른 저장 비용</h2>
+  <div class="control">
+    <label class="form-label" for="sparse-item-count">저장할 항목 수: <span id="sparse-count-label" class="tabular-nums">2</span>개</label>
+    <input id="sparse-item-count" class="form-range" type="range" min="1" max="4" value="2">
+  </div>
+  <div class="text-small">구조 모형 · 일반 Node 사용 · 키를 새 Integer 객체로 박싱한 경우 · 실제 바이트 크기 아님</div>
+  <div class="comparison">
+    <section class="panel" aria-label="HashMap 저장 구조">
+      <h3>HashMap&lt;Int, String&gt;</h3>
+      <div class="box">
+        <div class="header">버킷 배열 Node[] · 배열 헤더 1개</div>
+        <div id="sparse-buckets"></div>
+        <div class="text-small">슬롯은 Node 참조를 저장 · 빈 슬롯도 공간 사용</div>
+      </div>
+      <div class="arrow" aria-hidden="true">↓ 슬롯이 가리키는 별도 객체</div>
+      <div id="sparse-nodes"></div>
+      <div id="sparse-hash-summary" class="summary" aria-live="polite"></div>
+    </section>
+    <section class="panel" aria-label="SparseArray 저장 구조">
+      <h3>SparseArray&lt;String&gt;</h3>
+      <div class="box array">
+        <div class="header">키 배열 int[] · 배열 헤더 1개</div>
+        <div class="table-responsive"><table class="table table-sm"><thead><tr><th>인덱스</th><th>키 값 직접 저장</th></tr></thead><tbody id="sparse-key-array"></tbody></table></div>
+      </div>
+      <div class="arrow">같은 인덱스끼리 한 쌍 ↕</div>
+      <div class="box array">
+        <div class="header">값 배열 Object[] · 배열 헤더 1개</div>
+        <div class="table-responsive"><table class="table table-sm"><thead><tr><th>인덱스</th><th>값 객체 참조</th></tr></thead><tbody id="sparse-value-array"></tbody></table></div>
+      </div>
+      <div class="box">
+        <div class="label">항목마다 필요 없는 것</div>
+        <div>Integer 객체 + Node 객체</div>
+        <div>Node의 객체 헤더 + hash + key 참조 + next 참조</div>
+      </div>
+      <div id="sparse-array-summary" class="summary" aria-live="polite"></div>
+    </section>
+  </div>
+  <div class="arrow">양쪽의 값 참조 ↓ 같은 String 객체들</div>
+  <div id="sparse-shared-values" class="shared" aria-label="양쪽에서 공유하는 값 객체"></div>
+  <div class="text-small" style="margin-top:12px">공통 비용 제외: 컨테이너 객체 자체와 값 객체. 객체 헤더는 런타임 관리 공간이며 null 참조 필드도 자리를 차지함.</div>
+  <div class="text-small" style="margin-top:8px">Integer 캐시를 재사용하면 새 키 객체 비용은 줄어듦. SparseArray에도 남는 배열 용량은 존재. 노드·박싱을 생략하는 것이 핵심.</div>
+  <script>
+    (() => {
+      const root = document.getElementById('sparse-memory-visual');
+      const find = id => root.querySelector('#' + id);
+      const input = find('sparse-item-count');
+      function render() {
+        const count = Number(input.value);
+        find('sparse-count-label').textContent = count;
+        find('sparse-buckets').innerHTML = Array.from({length:count}, (_,i) => `<div>슬롯 ${i} → Node ${i}</div>`).join('') + '<div>빈 슬롯 → null</div>';
+        find('sparse-nodes').innerHTML = Array.from({length:count}, (_,i) => `
+          <div class="box node">
+            <div class="header">Node ${i} · 객체 헤더</div>
+            <div class="fields"><span>hash</span><span>해시값</span><span>key</span><span>→ Integer ${i}</span><span>value</span><span>→ 값 ${String.fromCharCode(65+i)}</span><span>next</span><span>null · 참조 필드 공간 유지</span></div>
+            <div class="integer">Integer ${i} · 객체 헤더 + 정숫값 ${1000+i*2000}</div>
+          </div>`).join('');
+        find('sparse-key-array').innerHTML = Array.from({length:count}, (_,i) => `<tr><td>${i}</td><td>${1000+i*2000} · int</td></tr>`).join('');
+        find('sparse-value-array').innerHTML = Array.from({length:count}, (_,i) => `<tr><td>${i}</td><td>→ 값 ${String.fromCharCode(65+i)}</td></tr>`).join('');
+        find('sparse-shared-values').innerHTML = Array.from({length:count}, (_,i) => `<span>값 ${String.fromCharCode(65+i)}: "${['one','two','three','four'][i]}"</span>`).join('');
+        find('sparse-hash-summary').textContent = `이 모형의 관리 객체: 배열 1 + Node ${count} + Integer ${count} = ${1+2*count}개`;
+        find('sparse-array-summary').textContent = '이 모형의 관리 객체: 키 배열 1 + 값 배열 1 = 2개';
+      }
+      input.addEventListener('input', render);
+      render();
+    })();
+  </script>
+</div>
